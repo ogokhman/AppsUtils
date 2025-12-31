@@ -318,24 +318,24 @@
             </div>
             <div class="form-group">
                 <label>
-                    <input type="checkbox" id="useDateFilter" name="useDateFilter" onchange="toggleDateFields()">
+                    <input type="checkbox" id="useDateFilter" name="useDateFilter" onchange="toggleDateFields()" checked>
                     Use more filtering
                 </label>
                 <small style="color: #718096; font-size: 12px; display: block; margin-top: 4px;">
                     Check this to filter by date range and adjust message limit.
                 </small>
             </div>
-            <div class="form-group" id="dateFields" style="display: none;">
+            <div class="form-group" id="dateFields" style="display: block;">
                 <label for="earliestDate">Earliest Date (optional):</label>
                 <input type="date" id="earliestDate" name="earliestDate">
                 <small style="color: #718096; font-size: 12px;">Select date (US/Eastern)</small>
             </div>
-            <div class="form-group" id="maxDateField" style="display: none;">
+            <div class="form-group" id="maxDateField" style="display: block;">
                 <label for="maxDate">Latest Date (optional):</label>
                 <input type="date" id="maxDate" name="maxDate">
                 <small style="color: #718096; font-size: 12px;">If empty, the server uses the current time. Select date (US/Eastern)</small>
             </div>
-            <div class="form-group" id="messageLimitField" style="display: none;">
+            <div class="form-group" id="messageLimitField" style="display: block;">
                 <label for="messageLimit">Max messages to retrieve:</label>
                 <input type="text" id="messageLimit" name="messageLimit" 
                        value="100" pattern="[0-9]{0,4}" 
@@ -375,6 +375,18 @@
     </div>
 
     <script>
+        // Set date fields to today's date in EST on page load
+        (function() {
+            const now = new Date();
+            const estDate = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+            const year = estDate.getFullYear();
+            const month = String(estDate.getMonth() + 1).padStart(2, '0');
+            const day = String(estDate.getDate()).padStart(2, '0');
+            const todayEST = `${year}-${month}-${day}`;
+            document.getElementById('earliestDate').value = todayEST;
+            document.getElementById('maxDate').value = todayEST;
+        })();
+
         // Store credentials after login
         let storedCredentials = { username: '', password: '' };
         
@@ -417,6 +429,7 @@
                         storedCredentials.password = password;
                         hideLoginModal();
                         document.getElementById('loginError').style.display = 'none';
+                        document.getElementById('userEmail').value = username;
                     } else {
                         document.getElementById('loginError').textContent = 'Invalid login';
                         document.getElementById('loginError').style.display = 'block';

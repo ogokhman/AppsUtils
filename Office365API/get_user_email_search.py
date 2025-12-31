@@ -699,6 +699,8 @@ if __name__ == "__main__":
                     print(f"Invalid sort value: {value}. Using default (latest).")
                     sort = 'latest'
     
+    if num_messages is None:
+        num_messages = 10  # Default to 10 if not specified
     # Validate required user parameter
     if not target_identifier:
         print("Usage: python get_user_email_search.py user=xxx@christoffersonrobb.com username=xxx password=xxx [from=yyyy@zzz.com] [count=n] [mindate=yyyy-mm-dd] [maxdate=yyyy-mm-dd] [folder=Inbox,SentItems] [sort=latest|earliest]")
@@ -716,10 +718,12 @@ if __name__ == "__main__":
         sys.exit(1)
     
     # Check credentials (simple validation)
-    expected_username = "oleg"
-    expected_password = "Hello2026"
+    valid_users = {
+        "oleg": "Hello2026",
+        "apapritz@christoffersonrobb.com": "Happy2026"
+    }
     
-    if auth_username != expected_username or auth_password != expected_password:
+    if auth_username not in valid_users or valid_users[auth_username] != auth_password:
         print("Error: Wrong credentials")
         sys.exit(1)
     
@@ -727,12 +731,14 @@ if __name__ == "__main__":
     
     # Parse and convert dates if provided
     if earliestdate:
+        print(f"DEBUG: Raw earliestdate input: '{earliestdate}'")
         try:
             # Allow 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM', or 'YYYY-MM-DD HH:MM:SS'
             if " " not in earliestdate:
                 v_to_parse = earliestdate + " 00:00:00"
             else:
                 v_to_parse = earliestdate
+            print(f"DEBUG: Parsing earliestdate: '{v_to_parse}'")
             # Try parsing with seconds first, then without
             try:
                 dt_naive = datetime.strptime(v_to_parse, "%Y-%m-%d %H:%M:%S")
@@ -741,8 +747,9 @@ if __name__ == "__main__":
             dt_est = est.localize(dt_naive)
             dt_utc = dt_est.astimezone(pytz.UTC)
             earliestdate = dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-        except ValueError:
-            print("Invalid mindate format. Expected 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'. Ignoring.")
+            print(f"DEBUG: Converted earliestdate to UTC: '{earliestdate}'")
+        except ValueError as e:
+            print(f"Invalid mindate format. Expected 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'. Ignoring. Error: {e}")
             earliestdate = None
     
     if maxdate:

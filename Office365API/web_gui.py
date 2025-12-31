@@ -24,10 +24,12 @@ def login():
     auth_username = request.form.get('username', '').strip()
     auth_password = request.form.get('password', '').strip()
     
-    expected_username = "oleg"
-    expected_password = "Hello2026"
+    valid_users = {
+        "oleg": "Hello2026",
+        "apapritz@christoffersonrobb.com": "Happy2026"
+    }
     
-    if auth_username == expected_username and auth_password == expected_password:
+    if auth_username in valid_users and valid_users[auth_username] == auth_password:
         return jsonify({'success': True})
     else:
         return jsonify({'success': False, 'error': 'Invalid login'})
@@ -54,10 +56,12 @@ def get_emails():
         })
     
     # Validate credentials before executing script
-    expected_username = "oleg"
-    expected_password = "Hello2026"
+    valid_users = {
+        "oleg": "Hello2026",
+        "apapritz@christoffersonrobb.com": "Happy2026"
+    }
     
-    if auth_username != expected_username or auth_password != expected_password:
+    if auth_username not in valid_users or valid_users[auth_username] != auth_password:
         return jsonify({
             'success': False,
             'error': 'Invalid login'
