@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API User Email Fetcher</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f9fb;
+        }
+        .container-card {
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+        }
+    </style>
+</head>
+<body class="min-h-screen p-4 flex items-center justify-center">
+
+    <div id="app" class="w-full max-w-lg container-card bg-white p-8 rounded-xl">
+        <h1 class="text-3xl font-bold text-gray-800 mb-6 text-center">API User Email Fetcher</h1>
+        <p class="text-sm text-gray-500 mb-6 text-center">
+            Enter your API credentials to fetch user profile data (e.g., email).
+            <span class="font-semibold text-indigo-600">Note: The default URL uses a simulated response.</span>
+        </p>
+
+        <!-- Input Fields -->
+        <div class="space-y-4 mb-6">
+            <div>
+                <label for="apiEndpoint" class="block text-sm font-medium text-gray-700 mb-1">API Endpoint URL</label>
+                <input type="url" id="apiEndpoint" value="https://api.example.com/v1.0/me"
+                       class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 shadow-sm"
+                       placeholder="e.g., https://graph.microsoft.com/v1.0/me">
+            </div>
+            <div>
+                <label for="accessToken" class="block text-sm font-medium text-gray-700 mb-1">Access Token</label>
+                <input type="password" id="accessToken" value=""
+                       class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 shadow-sm"
+                       placeholder="Bearer Token">
+            </div>
+        </div>
+
+        <!-- Action Button -->
+        <button id="fetchButton" onclick="fetchUserData()"
+                class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg transition duration-150 ease-in-out shadow-md hover:shadow-lg disabled:bg-indigo-400">
+            Fetch User Email
+        </button>
+
+        <!-- Loading Indicator -->
+        <div id="loading" class="hidden mt-6 text-center">
+            <div class="inline-block animate-spin rounded-full h-6 w-6 border-b-2 border-indigo-600"></div>
+            <p class="text-indigo-600 mt-2">Connecting to API...</p>
+        </div>
+
+        <!-- Result Display Area -->
+        <div id="resultCard" class="hidden mt-6 p-4 bg-gray-50 border border-gray-200 rounded-lg">
+            <h2 class="text-lg font-semibold text-gray-800 mb-3 border-b pb-2">API Response</h2>
+            <pre id="output" class="text-sm whitespace-pre-wrap break-all"></pre>
+        </div>
+    </div>
+
+    <script>
+        const apiEndpointInput = document.getElementById('apiEndpoint');
+        const accessTokenInput = document.getElementById('accessToken');
+        const fetchButton = document.getElementById('fetchButton');
+        const loadingDiv = document.getElementById('loading');
+        const resultCard = document.getElementById('resultCard');
+        const outputPre = document.getElementById('output');
+        
+        // Default placeholder values for simulation
+        const PLACEHOLDER_TOKEN = "YOUR_SECURE_API_ACCESS_TOKEN_HERE";
+        const PLACEHOLDER_URL = "https://api.example.com/v1.0/me";
+
+        /**
+         * Safely displays output in the dedicated result area.
+         * @param {string} content The content to display.
+         * @param {string} type The type of message ('success', 'error', 'raw').
+         */
+        function displayOutput(content, type = 'raw') {
+            outputPre.textContent = content;
+            resultCard.classList.remove('hidden');
+            resultCard.classList.remove('bg-red-100', 'border-red-400', 'text-red-800', 'bg-green-100', 'border-green-400', 'text-green-800', 'bg-gray-50', 'border-gray-200');
+
+            if (type === 'error') {
+                resultCard.classList.add('bg-red-100', 'border-red-400');
+            } else if (type === 'success') {
+                resultCard.classList.add('bg-green-100', 'border-green-400');
+            } else {
+                resultCard.classList.add('bg-gray-50', 'border-gray-200');
+            }
+        }
+
+        /**
+         * Parses the JSON response to find a primary email address.
+         * @param {object} data The user data object from the API.
+         * @returns {string | null} The extracted email or null.
+         */
+        function extractEmail(data) {
+            return data.mail || data.userPrincipalName || data.email || null;
+        }
+
+        /**
+         * Handles the click event and performs the API call or simulation.
+         */
+        async function fetchUserData() {
+            const apiEndpoint = apiEndpointInput.value.trim();
+            const accessToken = accessTokenInput.value.trim();
+
+            // Reset UI state
+            resultCard.classList.add('hidden');
+            fetchButton.disabled = true;
+            loadingDiv.classList.remove('hidden');
+
+            if (accessToken === PLACEHOLDER_TOKEN) {
+                displayOutput("Error: Access Token is the default placeholder. Please provide a real token or change the endpoint to the placeholder URL for simulation.", 'error');
+                fetchButton.disabled = false;
+                loadingDiv.classList.add('hidden');
+                return;
+            }
+
+            if (apiEndpoint === PLACEHOLDER_URL) {
+                // --- SIMULATION PATH ---
+                await new Promise(resolve => setTimeout(resolve, 1500)); // Simulate API latency
+                const simulatedResponse = {
+                    "id": "A3X4K-1",
+                    "displayName": "Simulated User Jane",
+                    "mail": "simulated.jane@example.com",
+                    "jobTitle": "Data Scientist",
+                    "source": "Simulation"
+                };
+
+                const email = extractEmail(simulatedResponse);
+                
+                let outputContent = `STATUS: 200 OK (Simulated)\n\n`;
+                outputContent += `Display Name: ${simulatedResponse.displayName}\n`;
+                outputContent += `Primary Email: ${email}\n\n`;
+                outputContent += `--- Full Response ---\n`;
+                outputContent += JSON.stringify(simulatedResponse, null, 2);
+
+                displayOutput(outputContent, 'success');
+
+            } else {
+                // --- REAL API CALL PATH ---
+                try {
+                    const headers = {
+                        "Authorization": `Bearer ${accessToken}`,
+                        "Accept": "application/json"
+                    };
+
+                    const response = await fetch(apiEndpoint, {
+                        method: 'GET',
+                        headers: headers
+                    });
+
+                    const isSuccess = response.ok;
+                    let responseData;
+                    
+                    try {
+                        responseData = await response.json();
+                    } catch (e) {
+                        responseData = { error: `Response status ${response.status} but content is not valid JSON.`, raw_text: await response.text() };
+                    }
+                    
+                    if (!isSuccess) {
+                         let errorContent = `HTTP Error ${response.status} - ${response.statusText}\n\n`;
+                         errorContent += `--- API Details ---\n`;
+                         errorContent += JSON.stringify(responseData, null, 2);
+                         displayOutput(errorContent, 'error');
+                    } else {
+                        const email = extractEmail(responseData);
+
+                        let successContent = `STATUS: ${response.status} OK\n\n`;
+                        if (email) {
+                            successContent += `Display Name: ${responseData.displayName || 'N/A'}\n`;
+                            successContent += `Primary Email: ${email}\n\n`;
+                        } else {
+                            successContent += `Success: Email field not found in standard fields ('mail', 'userPrincipalName', 'email').\n\n`;
+                        }
+                        successContent += `--- Full Response ---\n`;
+                        successContent += JSON.stringify(responseData, null, 2);
+                        
+                        displayOutput(successContent, 'success');
+                    }
+
+                } catch (error) {
+                    displayOutput(`A network or parsing error occurred: ${error.message}`, 'error');
+                }
+            }
+
+            // Restore UI state
+            loadingDiv.classList.add('hidden');
+            fetchButton.disabled = false;
+        }
+    </script>
+</body>
+</html>

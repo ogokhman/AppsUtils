@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Get Microsoft 365 Access Token</title>
+</head>
+<body>
+  <h2>Request Access Token</h2>
+  <button onclick="getToken()">Get Token</button>
+  <pre id="response"></pre>
+
+  <script>
+    
+    async function getToken()
+    {
+      // WARNING: Do not hardcode secrets in client-side code
+      // These should be loaded from a secure backend
+      const tenantId = "YOUR_TENANT_ID";
+      const clientId = "YOUR_CLIENT_ID";
+      const clientSecret = "YOUR_CLIENT_SECRET";
+      const scope = "https://outlook.office365.com/.default";   
+      const url = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
+    
+      const params = new URLSearchParams();
+      params.append('client_id', clientId);
+      params.append('scope', scope);
+      params.append('client_secret', clientSecret);
+      params.append('grant_type', 'client_credentials');
+	console.log(url);
+	  try
+	  {
+              const response = await fetch(url, {
+		  method: 'POST',
+		  headers: {
+		      'Content-Type': 'application/x-www-form-urlencoded'
+		  },
+		  body: params
+              });
+              const data = await response.json();
+              document.getElementById('response').textContent = JSON.stringify(data, null, 2);
+	  }
+	  
+	  catch (e)
+	  {
+              document.getElementById('response').textContent = 'Error: ' +e;
+	  }
+    }
+  </script>
+</body>
+</html>
