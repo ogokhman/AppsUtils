@@ -156,8 +156,25 @@ test_request() {
         fi
     fi
     
-    read -p "Enter number of messages to retrieve (default: 10): " NUM_MESSAGES
+    read -p "Enter number of messages to retrieve (default: 10, max: 500): " NUM_MESSAGES
     NUM_MESSAGES=${NUM_MESSAGES:-10}
+    
+    # Validate NUM_MESSAGES doesn't exceed 500
+    if [ "$NUM_MESSAGES" -gt 500 ]; then
+        echo -e "${YELLOW}Warning: Maximum is 500 messages. Setting to 500.${NC}"
+        NUM_MESSAGES=500
+    fi
+    
+    # Calculate default dates (today and today - 3 days)
+    END_DATE=$(date +%Y-%m-%d)
+    START_DATE=$(date -d "3 days ago" +%Y-%m-%d)
+    
+    read -p "Enter start date (default: $START_DATE, format: YYYY-MM-DD): " USER_START_DATE
+    START_DATE=${USER_START_DATE:-$START_DATE}
+    
+    read -p "Enter end date (default: $END_DATE, format: YYYY-MM-DD): " USER_END_DATE
+    END_DATE=${USER_END_DATE:-$END_DATE}
+    
     read -p "Filter by sender email (optional, press Enter to skip): " SENDER_FILTER
     
     echo -e "\n${YELLOW}Making API request...${NC}"
@@ -178,7 +195,11 @@ test_request() {
             
             # Get the actual API folder name from the mapping
             API_FOLDER="${FOLDER_MAP[$FOLDER]}"
-            API_URL="https://graph.microsoft.com/v1.0/users/$USER_EMAIL/mailFolders/$API_FOLDER/messages?\$select=subject,from,receivedDateTime&\$orderby=receivedDateTime%20desc&\$top=$NUM_MESSAGES"
+            
+            # Build date filter
+            DATE_FILTER="receivedDateTime ge ${START_DATE}T00:00:00Z and receivedDateTime le ${END_DATE}T23:59:59Z"
+            
+            API_URL="https://graph.microsoft.com/v1.0/users/$USER_EMAIL/mailFolders/$API_FOLDER/messages?\$select=subject,from,receivedDateTime&\$orderby=receivedDateTime%20desc&\$top=$NUM_MESSAGES&\$filter=${DATE_FILTER}"
             
             # Debug: Check token
             if [ -z "$ACCESS_TOKEN" ]; then
