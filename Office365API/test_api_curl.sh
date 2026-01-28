@@ -29,6 +29,14 @@ echo -e "${BLUE}=== Office 365 API Testing Tool ===${NC}\n"
 # Global variable for access token
 ACCESS_TOKEN=""
 
+# Check for debug flag
+DEBUG_MODE=0
+for arg in "$@"; do
+    if [ "$arg" = "--debug=1" ]; then
+        DEBUG_MODE=1
+    fi
+done
+
 # Function to get access token
 get_token() {
     echo -e "${YELLOW}Getting access token...${NC}"
@@ -65,8 +73,8 @@ show_examples() {
     echo "  -H 'Accept: application/json'"
     echo ""
     
-    echo -e "${YELLOW}3. Get emails from SentItems folder:${NC}"
-    echo "curl -X GET 'https://graph.microsoft.com/v1.0/users/USER_EMAIL/mailFolders/SentItems/messages?\$select=subject,from,toRecipients,receivedDateTime,parentFolderId&\$orderby=receivedDateTime desc&\$top=10' \\"
+    echo -e "${YELLOW}3. Get emails from Sent Items folder:${NC}"
+    echo "curl -X GET 'https://graph.microsoft.com/v1.0/users/USER_EMAIL/mailFolders/Sent%20Items/messages?\$select=subject,from,toRecipients,receivedDateTime,parentFolderId&\$orderby=receivedDateTime desc&\$top=10' \\"
     echo "  -H 'Authorization: Bearer YOUR_ACCESS_TOKEN' \\"
     echo "  -H 'Accept: application/json'"
     echo ""
@@ -74,144 +82,277 @@ show_examples() {
 
 # Function to test actual API request
 test_request() {
-    read -p "Enter user email address: " USER_EMAIL
+    # Predefined users
+    USERS=("oleg@christoffersonrobb.com" "apapritz@christoffersonrobb.com" "malik@christoffersonrobb.com")
+    MAILBOXES=("Inbox" "Archive" "Sent Items")
+    
+    # Mapping of display names to API folder names
+    declare -A FOLDER_MAP
+    FOLDER_MAP["Inbox"]="Inbox"
+    FOLDER_MAP["Archive"]="Archive"
+    FOLDER_MAP["Sent Items"]="SentItems"
+    
+    # Ask user to select from predefined list
+    echo -e "\n${BLUE}=== Select Users ===${NC}"
+    for i in "${!USERS[@]}"; do
+        echo "$((i+1)). ${USERS[$i]}"
+    done
+    echo "$((${#USERS[@]}+1)). ALL users"
+    echo ""
+    read -p "Select users (comma or space-separated, e.g., 1,3 or 1 3): " USER_CHOICE
+    
+    SELECTED_USERS=()
+    
+    # Check if user wants ALL users (just the number)
+    if [[ "$USER_CHOICE" == "$((${#USERS[@]}+1))" ]]; then
+        SELECTED_USERS=("${USERS[@]}")
+    else
+        # Replace commas with spaces and process each number
+        USER_CHOICE=${USER_CHOICE//,/ }
+        for choice in $USER_CHOICE; do
+            # Trim whitespace
+            choice=$(echo "$choice" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            # Check if it's a valid number
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#USERS[@]}" ]; then
+                SELECTED_USERS+=("${USERS[$((choice-1))]}")
+            fi
+        done
+        
+        if [ ${#SELECTED_USERS[@]} -eq 0 ]; then
+            echo -e "${RED}Invalid selection${NC}"
+            return 1
+        fi
+    fi
+    
+    # Ask user to select mailboxes
+    echo -e "\n${BLUE}=== Select Mailboxes ===${NC}"
+    for i in "${!MAILBOXES[@]}"; do
+        echo "$((i+1)). ${MAILBOXES[$i]}"
+    done
+    echo "$((${#MAILBOXES[@]}+1)). ALL mailboxes"
+    echo ""
+    read -p "Select mailboxes (comma or space-separated, e.g., 1,3 or 1 3): " MAILBOX_CHOICE
+    
+    SELECTED_MAILBOXES=()
+    
+    # Check if user wants ALL mailboxes (just the number)
+    if [[ "$MAILBOX_CHOICE" == "$((${#MAILBOXES[@]}+1))" ]]; then
+        SELECTED_MAILBOXES=("${MAILBOXES[@]}")
+    else
+        # Replace commas with spaces and process each number
+        MAILBOX_CHOICE=${MAILBOX_CHOICE//,/ }
+        for choice in $MAILBOX_CHOICE; do
+            # Trim whitespace
+            choice=$(echo "$choice" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            # Check if it's a valid number
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#MAILBOXES[@]}" ]; then
+                SELECTED_MAILBOXES+=("${MAILBOXES[$((choice-1))]}")
+            fi
+        done
+        
+        if [ ${#SELECTED_MAILBOXES[@]} -eq 0 ]; then
+            echo -e "${RED}Invalid selection${NC}"
+            return 1
+        fi
+    fi
+    
     read -p "Enter number of messages to retrieve (default: 10): " NUM_MESSAGES
     NUM_MESSAGES=${NUM_MESSAGES:-10}
-    read -p "Enter folder name (default: Inbox): " FOLDER
-    FOLDER=${FOLDER:-Inbox}
     read -p "Filter by sender email (optional, press Enter to skip): " SENDER_FILTER
     
     echo -e "\n${YELLOW}Making API request...${NC}"
     
-    API_URL="https://graph.microsoft.com/v1.0/users/$USER_EMAIL/mailFolders/$FOLDER/messages?\$select=subject,from,receivedDateTime&\$orderby=receivedDateTime%20desc&\$top=$NUM_MESSAGES"
-    
-    echo -e "${BLUE}Request URL:${NC}"
-    echo "$API_URL"
-    echo ""
-    
-    # Debug: Check token
-    if [ -z "$ACCESS_TOKEN" ]; then
-        echo -e "${RED}Error: ACCESS_TOKEN is empty!${NC}"
-        return 1
-    fi
-    echo -e "${YELLOW}Debug: Token present (${#ACCESS_TOKEN} chars)${NC}"
-    
-    RESPONSE=$(curl -s -X GET "$API_URL" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Accept: application/json")
-    
-    # Check if response is empty
-    if [ -z "$RESPONSE" ]; then
-        echo -e "${RED}Error: Empty response from API${NC}"
-        return 1
-    fi
-    
-    # Check if response contains error
-    if echo "$RESPONSE" | grep -q '"error"'; then
-        echo -e "${RED}Error in API response:${NC}"
-        echo "$RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$RESPONSE"
-        return 1
-    fi
-    
-    echo -e "${GREEN}✓ Request successful${NC}\n"
-    
-    # Parse and display messages with Python
-    echo "$RESPONSE" | python3 -c "
+    # Process each selected user
+    for USER_EMAIL in "${SELECTED_USERS[@]}"; do
+        echo -e "\n${BLUE}=== Processing: $USER_EMAIL ===${NC}"
+        echo "Selected folders: ${SELECTED_MAILBOXES[*]}"
+        
+        # Initialize response collection
+        RESPONSE_COUNT=0
+        
+        # Collect all responses
+        RESPONSE_COUNT=0
+        
+        for FOLDER in "${SELECTED_MAILBOXES[@]}"; do
+            echo -e "${YELLOW}Fetching from $FOLDER...${NC}"
+            
+            # Get the actual API folder name from the mapping
+            API_FOLDER="${FOLDER_MAP[$FOLDER]}"
+            API_URL="https://graph.microsoft.com/v1.0/users/$USER_EMAIL/mailFolders/$API_FOLDER/messages?\$select=subject,from,receivedDateTime&\$orderby=receivedDateTime%20desc&\$top=$NUM_MESSAGES"
+            
+            # Debug: Check token
+            if [ -z "$ACCESS_TOKEN" ]; then
+                echo -e "${RED}Error: ACCESS_TOKEN is empty!${NC}"
+                continue
+            fi
+            
+            RESPONSE=$(curl -s -X GET "$API_URL" \
+                -H "Authorization: Bearer $ACCESS_TOKEN" \
+                -H "Accept: application/json")
+            
+            # Check if response contains error
+            if echo "$RESPONSE" | grep -q '"error"'; then
+                echo -e "${RED}Error in API response for $FOLDER:${NC}"
+                echo "$RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$RESPONSE"
+                continue
+            fi
+            
+            # Tag each message with folder name and store response
+            echo "$RESPONSE" | python3 -c "
 import json
 import sys
+data = json.loads(sys.stdin.read())
+messages = data.get('value', [])
+for msg in messages:
+    msg['_folderName'] = '$FOLDER'
+with open('/tmp/response_$RESPONSE_COUNT.json', 'w') as f:
+    json.dump({'value': messages}, f)
+"
+            RESPONSE_COUNT=$((RESPONSE_COUNT + 1))
+        done
+        
+        # Merge all responses
+        ALL_MESSAGES=$(python3 -c "
+import json
+import sys
+import os
+
+all_messages = []
+for i in range($RESPONSE_COUNT):
+    filename = f'/tmp/response_{i}.json'
+    if os.path.exists(filename):
+        with open(filename, 'r') as f:
+            try:
+                data = json.load(f)
+                messages = data.get('value', [])
+                all_messages.extend(messages)
+            except:
+                pass
+        os.remove(filename)  # Clean up
+
+# Sort by receivedDateTime desc
+all_messages.sort(key=lambda x: x.get('receivedDateTime', ''), reverse=True)
+
+# Limit to NUM_MESSAGES total
+all_messages = all_messages[:$NUM_MESSAGES]
+
+result = {'value': all_messages}
+print(json.dumps(result))
+")
+        
+        # Now display all collected messages
+        echo "$ALL_MESSAGES" | python3 -c "
+import json
+import sys
+import re
 from datetime import datetime
+
+user_email = '$USER_EMAIL'
+user_name = user_email.split('@')[0] if '@' in user_email else user_email
 
 try:
     data = json.loads(sys.stdin.read())
     messages = data.get('value', [])
-    
-    # Filter by sender if specified
+
     sender_filter = '$SENDER_FILTER'.strip().lower()
     if sender_filter:
         print(f'Filtering by sender: {sender_filter}')
         filtered = []
         for msg in messages:
-            from_data = msg.get('from', {})
-            email_info = from_data.get('emailAddress', {})
+            email_info = (msg.get('from') or {}).get('emailAddress') or {}
             from_addr = (email_info.get('address') or '').lower()
             from_name = (email_info.get('name') or '').lower()
-            
             if sender_filter in from_addr or sender_filter in from_name:
                 filtered.append(msg)
         messages = filtered
         print(f'Found {len(messages)} messages from sender\n')
-    
+
     if not messages:
         print('No messages found.')
         sys.exit(0)
-    
+
     print(f'Found {len(messages)} messages:\n')
-    print(f\"{'#':<4} {'Date/Time':<25} {'From':<40} {'Subject':<60}\")
-    print('-' * 130)
-    
+    print(f\"{'#':<4} {'User':<12} {'Folder':<15} {'Date/Time':<25} {'From':<40} {'Subject':<40}\")
+    print('-' * 148)
+
     for idx, msg in enumerate(messages, 1):
-        # Extract from information
-        from_data = msg.get('from', {})
-        from_email = from_data.get('emailAddress', {}).get('address', 'N/A')
-        from_name = from_data.get('emailAddress', {}).get('name', '')
-        from_display = f'{from_name} <{from_email}>' if from_name else from_email
-        from_display = from_display[:37] + '...' if len(from_display) > 40 else from_display
+        email_info = (msg.get('from') or {}).get('emailAddress') or {}
+        from_email = email_info.get('address') or 'N/A'
+        from_name = email_info.get('name') or ''
         
-        # Extract subject
-        subject = msg.get('subject', '(No Subject)')
-        subject = subject[:57] + '...' if len(subject) > 60 else subject
-        
-        # Format date
-        received = msg.get('receivedDateTime', '')
+        # Get the actual folder name from the message
+        folder_name = msg.get('_folderName', 'Unknown')
+
+        from_name = re.sub(r'<\/[^>]*>', '', from_name).strip()
+        from_name = from_name.replace('<', '').replace('>', '')
+
+        # For Sent Items, only use name (address contains X.500 DN)
+        if folder_name == 'Sent Items':
+            from_display = from_name if from_name else 'N/A'
+        else:
+            if from_name and from_email != 'N/A':
+                from_display = f'{from_name} <{from_email}>'
+            elif from_name:
+                from_display = from_name
+            else:
+                from_display = from_email
+
+        subject = msg.get('subject') or '(No Subject)'
+        subject = subject[:37] + '...' if len(subject) > 40 else subject
+
+        received = msg.get('receivedDateTime') or ''
         try:
             dt = datetime.fromisoformat(received.replace('Z', '+00:00'))
             date_str = dt.strftime('%Y-%m-%d %H:%M:%S')
         except:
             date_str = 'N/A'
         
-        print(f'{idx:<4} {date_str:<25} {from_display:<40} {subject:<60}')
-    
+        # Get the actual folder name from the message
+        folder_name = msg.get('_folderName', 'Unknown')
+
+        print(f'{idx:<4} {user_name:<12} {folder_name:<15} {date_str:<25} {from_display:<40} {subject:<40}')
+
 except Exception as e:
     print(f'Error: {e}', file=sys.stderr)
     import traceback
     traceback.print_exc()
     sys.exit(1)
 "
-    
-    if [ $? -eq 0 ]; then
-        echo ""
-        read -p "Show full JSON response? (y/n): " SHOW_FULL
-        if [ "$SHOW_FULL" = "y" ]; then
-            echo "$RESPONSE" | python3 -m json.tool | less
+        
+        # Show raw JSON only in debug mode
+        if [ "$DEBUG_MODE" -eq 1 ]; then
+            echo ""
+            echo -e "${BLUE}=== RAW JSON RESPONSE ===${NC}"
+            echo "$ALL_MESSAGES" | python3 -m json.tool 2>/dev/null || echo "$ALL_MESSAGES"
         fi
-    fi
+    done
 }
 
 # Main menu
 while true; do
     echo -e "\n${BLUE}=== Menu ===${NC}"
-    echo "1. Get access token"
-    echo "2. Show curl command examples"
-    echo "3. Test API request (interactive)"
-    echo "4. Exit"
+    echo "1. Office 365 API Request"
+    echo "2. Get Access Token (optional)"
+    echo "3. Show Curl Command Examples"
+    echo "Q. Exit"
     echo ""
-    read -p "Select option (1-4): " OPTION
+    read -p "Select option (1, 2, 3, or Q): " OPTION
     
     case $OPTION in
         1)
-            get_token
-            ;;
-        2)
-            show_examples
-            ;;
-        3)
             if [ -z "$ACCESS_TOKEN" ]; then
                 echo -e "${YELLOW}No access token found. Getting token first...${NC}\n"
                 get_token
             fi
             test_request
             ;;
-        4)
+        2)
+            get_token
+            ;;
+        3)
+            show_examples
+            ;;
+        Q|q)
             echo -e "${GREEN}Goodbye!${NC}"
             exit 0
             ;;
