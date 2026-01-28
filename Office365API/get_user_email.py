@@ -268,17 +268,23 @@ def get_user_email(target_user_identifier, num_messages=None, earliestdate=None,
     if maxdate:
         filters.append(f"receivedDateTime le {maxdate}")
     
-    # Server-side sender filter for multiple addresses
+    # Server-side sender search using $search parameter (more efficient than client-side filtering)
     from_email_addresses = []
+    use_search = False
     if fromEmailAddress and fromEmailAddress.strip():
         # Split by comma and clean up
-        from_email_addresses = [addr.strip().replace("'", "''") 
-                               for addr in fromEmailAddress.strip().split(',') 
-                               if addr.strip()]
+        from_email_addresses = [addr.strip() for addr in fromEmailAddress.strip().split(',') if addr.strip()]
         print("FROM EMAIL ADDRESSES: ", from_email_addresses)
         
-        # Note: Graph API doesn't support OR queries for multiple from addresses
-        # We'll filter client-side after retrieving messages
+        # Use $search for single sender (server-side, very efficient)
+        # For multiple senders, we'll use client-side filtering (Graph API doesn't support OR in search)
+        if len(from_email_addresses) == 1:
+            # Use server-side search - much more efficient!
+            params["$search"] = f'"from:{from_email_addresses[0]}"'
+            use_search = True
+            print(f"Using server-side search: $search=\"from:{from_email_addresses[0]}\"")
+        else:
+            print(f"Multiple senders specified. Will use client-side filtering after retrieval.")
         
     if filters:
         params["$filter"] = " and ".join(filters)
@@ -351,10 +357,13 @@ def get_user_email(target_user_identifier, num_messages=None, earliestdate=None,
     print(f"\nTotal messages retrieved from API: {len(all_messages)}")
     messages = all_messages
 
-    # Client-side sender filter for multiple addresses
+    # Client-side sender filter - only for multiple addresses (single address uses server-side $search)
     print(f"DEBUG: from_email_addresses = {from_email_addresses}", flush=True)
-    if from_email_addresses:
-        print("Applying sender filter...", flush=True)
+    print(f"DEBUG: use_search = {use_search}", flush=True)
+    
+    if from_email_addresses and not use_search:
+        # Only filter client-side if we have multiple senders (server-side search was not used)
+        print("Applying client-side sender filter for multiple addresses...", flush=True)
         filtered = []
         for msg in messages:
             from_data = msg.get('from', {})
@@ -376,8 +385,10 @@ def get_user_email(target_user_identifier, num_messages=None, earliestdate=None,
                     break  # Match found, no need to check other terms
         messages = filtered
         print(f"After filtering by sender: {len(messages)} messages")
+    elif use_search:
+        print(f"Server-side search applied. Retrieved {len(messages)} messages from sender.")
     else:
-        print("DEBUG: Skipping sender filter (no From address specified)", flush=True)
+        print("DEBUG: No sender filter specified", flush=True)
 
         # Filter out messages from excluded folders (COMMENTED OUT)
         # excluded_folders = ['Sent Items', 'Deleted Items', 'Junk Email']
