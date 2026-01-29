@@ -25,9 +25,9 @@ TOKEN_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
 SCOPE = "https://graph.microsoft.com/.default"
 
 EST = pytz.timezone('America/New_York')
-GREEN = '\033[92m'
-YELLOW = '\033[93m'
-CYAN = '\033[96m'
+GREEN = '\033[32m'
+YELLOW = '\033[33m'
+CYAN = '\033[36m'
 RESET = '\033[0m'
 
 
@@ -59,7 +59,7 @@ def menu_select(title, items, allow_all=True, allow_skip=False):
         print(f"  X. SKIP (no filter)")
 
     while True:
-        choice = input(f"\n{YELLOW}Select (e.g. 1,3 or A{' or X' if allow_skip else ''}): {RESET}").strip()
+        choice = input(f"\n{GREEN}Select (e.g. 1,3 or A{' or X' if allow_skip else ''}): {RESET}").strip()
         if not choice:
             continue
 
@@ -85,11 +85,58 @@ def menu_select(title, items, allow_all=True, allow_skip=False):
             print("  Invalid input. Enter numbers separated by commas, or A for all.")
 
 
+def menu_select_domains(title, items):
+    """
+    Display a numbered menu for domain selection with option to type custom domain.
+    User can pick numbers (comma-separated), 'A' for all, 'X' to skip, or 'T' to type.
+    Returns None if skipped.
+    """
+    print(f"\n{CYAN}── {title} ──{RESET}")
+    for i, item in enumerate(items, 1):
+        print(f"  {i}. {item}")
+    print(f"  A. ALL")
+    print(f"  T. TYPE custom domain/email")
+    print(f"  X. SKIP (no filter)")
+
+    while True:
+        choice = input(f"\n{GREEN}Select (e.g. 1,3 or A or T or X): {RESET}").strip()
+        if not choice:
+            continue
+
+        if choice.upper() == 'X':
+            return None
+
+        if choice.upper() == 'A':
+            return list(items)
+
+        if choice.upper() == 'T':
+            custom = input(f"{GREEN}Enter domain or email (e.g. gmail.com or user@example.com): {RESET}").strip()
+            if custom:
+                return [custom]
+            print("  No input provided.")
+            continue
+
+        try:
+            indices = [int(x.strip()) for x in choice.split(',')]
+            selected = []
+            for idx in indices:
+                if 1 <= idx <= len(items):
+                    selected.append(items[idx - 1])
+                else:
+                    print(f"  Invalid number: {idx}. Valid range: 1-{len(items)}")
+                    selected = []
+                    break
+            if selected:
+                return selected
+        except ValueError:
+            print("  Invalid input. Enter numbers, A for all, T to type, or X to skip.")
+
+
 def menu_date(prompt, default):
     """Prompt for a date with a default value. Returns YYYY-MM-DD string."""
     default_str = default.strftime('%Y-%m-%d')
     while True:
-        value = input(f"{YELLOW}{prompt} [{default_str}]: {RESET}").strip()
+        value = input(f"{GREEN}{prompt} [{default_str}]: {RESET}").strip()
         if not value:
             return default_str
         try:
@@ -222,13 +269,41 @@ def get_folder_name(folder_id, token, user_email):
 
 def _get_folder_id(token, user_email, folder_name):
     """Resolve a folder display name to its ID."""
+    # Map well-known folder names to their API aliases
+    well_known_folders = {
+        'inbox': 'inbox',
+        'drafts': 'drafts',
+        'sent items': 'sentitems',
+        'sent': 'sentitems',
+        'deleted items': 'deleteditems',
+        'junk email': 'junkemail',
+        'junk': 'junkemail',
+        'archive': 'archive',
+        'outbox': 'outbox',
+    }
+
+    # Try well-known folder alias first
+    folder_lower = folder_name.lower()
+    if folder_lower in well_known_folders:
+        alias = well_known_folders[folder_lower]
+        url = f"{GRAPH_BASE}/users/{user_email}/mailFolders/{alias}"
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        try:
+            resp = requests.get(url, headers=headers)
+            if resp.status_code == 200:
+                return resp.json().get('id')
+        except Exception:
+            pass
+
+    # Fall back to searching all folders
     url = f"{GRAPH_BASE}/users/{user_email}/mailFolders"
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    params = {"$top": 100}  # Get more folders to avoid pagination issues
     try:
-        resp = requests.get(url, headers=headers)
+        resp = requests.get(url, headers=headers, params=params)
         resp.raise_for_status()
         for folder in resp.json().get('value', []):
-            if folder.get('displayName', '').lower() == folder_name.lower():
+            if folder.get('displayName', '').lower() == folder_lower:
                 return folder.get('id')
     except Exception as e:
         print(f"  Error resolving folder '{folder_name}': {e}")
@@ -256,12 +331,20 @@ def fetch_emails(token, user_email, search_domains, mindate, maxdate, folders):
     max_dt = EST.localize(datetime.strptime(maxdate + ' 23:59:59', '%Y-%m-%d %H:%M:%S'))
     max_utc = max_dt.astimezone(pytz.UTC)
 
-    # Build search query for sender domains/addresses (if any)
-    search_query = None
+    # Build search query with both sender and date range
+    query_parts = []
+    
+    # 1. Sender filter
     if search_domains:
         from_terms = [f'from:{domain}' for domain in search_domains]
-        search_query = " OR ".join(from_terms)
+        query_parts.append(f"({' OR '.join(from_terms)})")
+    
+    # 2. Date filter (Using KQL syntax for date range)
+    # KQL date format: YYYY-MM-DD
+    query_parts.append(f"received:{mindate}..{maxdate}")
 
+    final_search_query = " AND ".join(query_parts)
+    
     # Resolve folder names to IDs
     print("\n  Resolving folder IDs...", flush=True)
     folder_ids = {}
@@ -277,77 +360,77 @@ def fetch_emails(token, user_email, search_domains, mindate, maxdate, folders):
         print("  No valid folders found.")
         return []
 
-    # Query /messages (with $search if sender filter, otherwise just $filter for dates)
-    url = f"{GRAPH_BASE}/users/{user_email}/messages"
-    params = {
-        "$select": "subject,from,toRecipients,receivedDateTime,parentFolderId",
-        "$top": 100
-    }
-    if search_query:
-        params["$search"] = f'"{search_query}"'
-    else:
-        # No sender filter — can use $filter and $orderby since no $search
-        min_utc_str = min_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
-        max_utc_str = max_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
-        params["$filter"] = f"receivedDateTime ge {min_utc_str} and receivedDateTime le {max_utc_str}"
-        params["$orderby"] = "receivedDateTime asc"
-
     all_messages = []
-    page = 0
-    print(f"\n  Searching messages...", flush=True)
-    while url:
-        try:
-            # Debug: show full URL with params on first page
-            if page == 0:
-                prepared = requests.Request("GET", url, headers=headers, params=params).prepare()
-                print(f"  DEBUG URL: {prepared.url}", flush=True)
 
-            resp = requests.get(url, headers=headers, params=params if page == 0 else None)
+    # Query each folder separately
+    for folder_id, folder_name in folder_ids.items():
+        print(f"\n  Searching in {folder_name}...", flush=True)
 
-            # Debug: show response on error
-            if resp.status_code >= 400:
-                print(f"\n  DEBUG Response Status: {resp.status_code}")
-                try:
-                    print(f"  DEBUG Response Body: {json.dumps(resp.json(), indent=2)}")
-                except Exception:
-                    print(f"  DEBUG Response Text: {resp.text[:500]}")
+        # Query messages from this specific folder
+        url = f"{GRAPH_BASE}/users/{user_email}/mailFolders/{folder_id}/messages"
+        params = {
+            "$select": "subject,from,toRecipients,receivedDateTime,parentFolderId",
+            "$top": 100,
+            "$search": f'"{final_search_query}"'
+        }
 
-            resp.raise_for_status()
-            data = resp.json()
+        page = 0
+        folder_messages = []
+        while url:
+            try:
+                # Debug: show full URL with params on first page
+                if page == 0:
+                    prepared = requests.Request("GET", url, headers=headers, params=params).prepare()
+                    print(f"    DEBUG URL: {prepared.url}", flush=True)
 
-            messages = data.get('value', [])
-            all_messages.extend(messages)
-            print(f"  Page {page + 1}: {len(messages)} messages (total: {len(all_messages)})", flush=True)
+                resp = requests.get(url, headers=headers, params=params if page == 0 else None)
 
-            # When no sender search, stop at 100 messages
-            if not search_query and len(all_messages) >= 100:
-                all_messages = all_messages[:100]
-                print("  (limited to 100 messages, no sender filter)")
-                url = None
+                # Debug: show response on error
+                if resp.status_code >= 400:
+                    print(f"\n    DEBUG Response Status: {resp.status_code}")
+                    try:
+                        print(f"    DEBUG Response Body: {json.dumps(resp.json(), indent=2)}")
+                    except Exception:
+                        print(f"    DEBUG Response Text: {resp.text[:500]}")
+
+                resp.raise_for_status()
+                data = resp.json()
+
+                messages = data.get('value', [])
+                folder_messages.extend(messages)
+                print(f"    Page {page + 1}: {len(messages)} messages (folder total: {len(folder_messages)})", flush=True)
+
+                # Stop at 1000 messages per folder for safety
+                if len(folder_messages) >= 1000:
+                    folder_messages = folder_messages[:1000]
+                    print("    (limited to 1000 messages)")
+                    url = None
+                    break
+
+                url = data.get('@odata.nextLink')
+                page += 1
+
+                if page > 100:
+                    print("    (page limit reached)")
+                    break
+            except requests.exceptions.HTTPError as e:
+                print(f"    HTTP error: {e.response.status_code}")
+                break
+            except Exception as e:
+                print(f"    Error: {e}")
                 break
 
-            url = data.get('@odata.nextLink')
-            page += 1
+        all_messages.extend(folder_messages)
 
-            if page > 100:
-                print("  (page limit reached)")
-                break
-        except requests.exceptions.HTTPError as e:
-            print(f"  HTTP error: {e.response.status_code}")
-            break
-        except Exception as e:
-            print(f"  Error: {e}")
-            break
+    print(f"\n  Total messages from all folders: {len(all_messages)}", flush=True)
 
-    # Client-side filtering: by folder and date range
+    # Client-side filtering: date range
+    # Although KQL filters by date, we double check to be precise with timezones if needed
+    # but strictly speaking, KQL received:start..end includes the whole end day.
+    # The previous logic had a precise UTC range. We'll keep the client-side check just in case
+    # KQL returns slightly broader results.
     filtered = []
     for msg in all_messages:
-        # Check folder
-        msg_folder_id = msg.get('parentFolderId', '')
-        if msg_folder_id not in folder_ids:
-            continue
-
-        # Check date range
         raw_dt = msg.get('receivedDateTime', '')
         try:
             dt = datetime.fromisoformat(raw_dt.replace('Z', '+00:00'))
@@ -357,7 +440,6 @@ def fetch_emails(token, user_email, search_domains, mindate, maxdate, folders):
                 continue
         except Exception:
             continue
-
         filtered.append(msg)
 
     # Sort ascending by date
@@ -368,9 +450,9 @@ def fetch_emails(token, user_email, search_domains, mindate, maxdate, folders):
             return datetime.min.replace(tzinfo=pytz.UTC)
 
     filtered.sort(key=parse_dt)
-
+    
     if len(filtered) < len(all_messages):
-        print(f"\n  Filtered by date range: {len(all_messages)} -> {len(filtered)} messages")
+        print(f"\n  Filtered by precise date/time: {len(all_messages)} -> {len(filtered)} messages")
 
     return filtered
 
@@ -446,8 +528,8 @@ def main():
     # 1. Select users
     selected_users = menu_select("Select User Mailbox", users)
 
-    # 2. Select from domains (X to skip)
-    selected_domains = menu_select("Select From (sender domain/address)", domains, allow_skip=True)
+    # 2. Select from domains (X to skip, T to type custom)
+    selected_domains = menu_select_domains("Select From (sender domain/address)", domains)
 
     # 3. Select min date
     default_min = datetime.now() - timedelta(days=10)
@@ -468,7 +550,7 @@ def main():
     print(f"  Folders: {', '.join(selected_folders)}")
     print(f"  Sort:    ascending (earliest first)")
 
-    proceed = input(f"\n{YELLOW}Proceed? (Y/n): {RESET}").strip()
+    proceed = input(f"\n{GREEN}Proceed? (Y/n): {RESET}").strip()
     if proceed.lower() == 'n':
         print("Cancelled.")
         sys.exit(0)
