@@ -196,10 +196,19 @@ test_request() {
             # Get the actual API folder name from the mapping
             API_FOLDER="${FOLDER_MAP[$FOLDER]}"
             
-            # Build date filter
+            # Build date filter and URL encode spaces
             DATE_FILTER="receivedDateTime ge ${START_DATE}T00:00:00Z and receivedDateTime le ${END_DATE}T23:59:59Z"
+            DATE_FILTER_ENCODED="${DATE_FILTER// /%20}"
             
-            API_URL="https://graph.microsoft.com/v1.0/users/$USER_EMAIL/mailFolders/$API_FOLDER/messages?\$select=subject,from,receivedDateTime&\$orderby=receivedDateTime%20desc&\$top=$NUM_MESSAGES&\$filter=${DATE_FILTER}"
+            # Build URL - use $search for sender (cannot combine with $filter)
+            if [ -n "$SENDER_FILTER" ]; then
+                # Use $search parameter for sender - $filter and $orderby not supported with $search
+                SEARCH_ENCODED="from:${SENDER_FILTER}"
+                SEARCH_ENCODED="${SEARCH_ENCODED// /%20}"
+                API_URL="https://graph.microsoft.com/v1.0/users/$USER_EMAIL/mailFolders/$API_FOLDER/messages?\$select=subject,from,toRecipients,receivedDateTime&\$top=$NUM_MESSAGES&\$search=\"${SEARCH_ENCODED}\""
+            else
+                API_URL="https://graph.microsoft.com/v1.0/users/$USER_EMAIL/mailFolders/$API_FOLDER/messages?\$select=subject,from,toRecipients,receivedDateTime&\$orderby=receivedDateTime%20desc&\$top=$NUM_MESSAGES&\$filter=${DATE_FILTER_ENCODED}"
+            fi
             
             # Debug: Check token
             if [ -z "$ACCESS_TOKEN" ]; then
@@ -207,27 +216,67 @@ test_request() {
                 continue
             fi
             
-            RESPONSE=$(curl -s -X GET "$API_URL" \
+            # Show URL for debugging
+            echo -e "${YELLOW}API URL: $API_URL${NC}"
+            
+            # Use temp file to separate verbose output from response
+            TEMP_RESPONSE="/tmp/curl_response_$$.txt"
+            HTTP_CODE=$(curl -s -w "%{http_code}" -X GET "$API_URL" \
                 -H "Authorization: Bearer $ACCESS_TOKEN" \
-                -H "Accept: application/json")
+                -H "Accept: application/json" \
+                -o "$TEMP_RESPONSE")
+            
+            RESPONSE_BODY=$(cat "$TEMP_RESPONSE")
+            rm -f "$TEMP_RESPONSE"
+            
+            # Debug output for troubleshooting
+            echo -e "${YELLOW}HTTP Status: $HTTP_CODE${NC}"
+            
+            if [ "$DEBUG_MODE" -ge 2 ]; then
+                echo -e "${BLUE}Response Body Length: ${#RESPONSE_BODY}${NC}"
+                echo -e "${BLUE}Response (first 500 chars):${NC}"
+                echo "$RESPONSE_BODY" | head -c 500
+                echo ""
+                # Also save to file for inspection
+                echo "$RESPONSE_BODY" > /tmp/api_response_$FOLDER.json
+                echo "Response saved to /tmp/api_response_$FOLDER.json"
+            fi
+            
+            # Check HTTP status
+            if [ "$HTTP_CODE" != "200" ]; then
+                echo -e "${RED}Error: HTTP $HTTP_CODE${NC}"
+                echo "$RESPONSE_BODY"
+                continue
+            fi
+            
+            # Check if response is empty
+            if [ -z "$RESPONSE_BODY" ]; then
+                echo -e "${YELLOW}Empty response from API for $FOLDER${NC}"
+                continue
+            fi
             
             # Check if response contains error
-            if echo "$RESPONSE" | grep -q '"error"'; then
+            if echo "$RESPONSE_BODY" | grep -q '"error"'; then
                 echo -e "${RED}Error in API response for $FOLDER:${NC}"
-                echo "$RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$RESPONSE"
+                echo "$RESPONSE_BODY" | python3 -m json.tool 2>/dev/null || echo "$RESPONSE_BODY"
                 continue
             fi
             
             # Tag each message with folder name and store response
-            echo "$RESPONSE" | python3 -c "
+            echo "$RESPONSE_BODY" | python3 -c "
 import json
 import sys
-data = json.loads(sys.stdin.read())
-messages = data.get('value', [])
-for msg in messages:
-    msg['_folderName'] = '$FOLDER'
-with open('/tmp/response_$RESPONSE_COUNT.json', 'w') as f:
-    json.dump({'value': messages}, f)
+try:
+    data = json.loads(sys.stdin.read())
+    messages = data.get('value', [])
+    for msg in messages:
+        msg['_folderName'] = '$FOLDER'
+    with open('/tmp/response_$RESPONSE_COUNT.json', 'w') as f:
+        json.dump({'value': messages}, f)
+except json.JSONDecodeError as e:
+    print(f'Error parsing JSON: {e}', file=sys.stderr)
+    with open('/tmp/response_$RESPONSE_COUNT.json', 'w') as f:
+        json.dump({'value': []}, f)
 "
             RESPONSE_COUNT=$((RESPONSE_COUNT + 1))
         done
@@ -274,6 +323,8 @@ user_name = user_email.split('@')[0] if '@' in user_email else user_email
 try:
     data = json.loads(sys.stdin.read())
     messages = data.get('value', [])
+    
+    print(f'Total messages fetched: {len(messages)}')
 
     sender_filter = '$SENDER_FILTER'.strip().lower()
     if sender_filter:
@@ -293,7 +344,7 @@ try:
         sys.exit(0)
 
     print(f'Found {len(messages)} messages:\n')
-    print(f\"{'#':<4} {'User':<12} {'Folder':<15} {'Date/Time':<25} {'From':<40} {'Subject':<40}\")
+    print(f\"{'#':<4} {'User':<12} {'Folder':<15} {'Date/Time':<25} {'From/To':<40} {'Subject':<40}\")
     print('-' * 148)
 
     for idx, msg in enumerate(messages, 1):
@@ -307,9 +358,26 @@ try:
         from_name = re.sub(r'<\/[^>]*>', '', from_name).strip()
         from_name = from_name.replace('<', '').replace('>', '')
 
-        # For Sent Items, only use name (address contains X.500 DN)
+        # For Sent Items, display recipients instead of sender
         if folder_name == 'Sent Items':
-            from_display = from_name if from_name else 'N/A'
+            to_recipients = msg.get('toRecipients', [])
+            if to_recipients:
+                to_list = []
+                for recipient in to_recipients:
+                    email_info = recipient.get('emailAddress') or {}
+                    to_email = email_info.get('address') or 'N/A'
+                    to_name = email_info.get('name') or ''
+                    if to_name and to_email != 'N/A':
+                        to_list.append(f'{to_name} <{to_email}>')
+                    elif to_name:
+                        to_list.append(to_name)
+                    else:
+                        to_list.append(to_email)
+                from_display = '; '.join(to_list[:2])  # Limit to 2 recipients
+                if len(to_list) > 2:
+                    from_display += f'; +{len(to_list) - 2} more'
+            else:
+                from_display = 'N/A'
         else:
             if from_name and from_email != 'N/A':
                 from_display = f'{from_name} <{from_email}>'
