@@ -74,7 +74,7 @@ show_examples() {
     echo ""
     
     echo -e "${YELLOW}3. Get emails from Sent Items folder:${NC}"
-    echo "curl -X GET 'https://graph.microsoft.com/v1.0/users/USER_EMAIL/mailFolders/Sent%20Items/messages?\$select=subject,from,toRecipients,receivedDateTime,parentFolderId&\$orderby=receivedDateTime desc&\$top=10' \\"
+    echo "curl -X GET 'https://graph.microsoft.com/v1.0/users/USER_EMAIL/mailFolders/Sent%20Items/messages?\$select=subject,from,toRecipients,sentDateTime,parentFolderId&\$orderby=sentDateTime desc&\$top=10' \\"
     echo "  -H 'Authorization: Bearer YOUR_ACCESS_TOKEN' \\"
     echo "  -H 'Accept: application/json'"
     echo ""
@@ -196,6 +196,15 @@ test_request() {
             # Get the actual API folder name from the mapping
             API_FOLDER="${FOLDER_MAP[$FOLDER]}"
             
+            # Determine which date field to use based on folder type
+            if [ "$FOLDER" = "Sent Items" ]; then
+                DATE_FIELD="sentDateTime"
+                DATE_SEARCH_FIELD="sent"
+            else
+                DATE_FIELD="receivedDateTime"
+                DATE_SEARCH_FIELD="received"
+            fi
+            
             # Build URL using $search (supports more flexible queries, but no orderby)
             # Build search query based on filters
             SEARCH_QUERY=""
@@ -205,9 +214,14 @@ test_request() {
             fi
             
             # Add date range to search query
-            SEARCH_QUERY="received>=${START_DATE} AND received<=${END_DATE}"
+            SEARCH_QUERY="${DATE_SEARCH_FIELD}>=${START_DATE} AND ${DATE_SEARCH_FIELD}<=${END_DATE}"
             if [ -n "$SENDER_FILTER" ]; then
-                SEARCH_QUERY="from:${SENDER_FILTER} AND ${SEARCH_QUERY}"
+                # Use 'to:' for Sent Items, 'from:' for other folders
+                if [ "$FOLDER" = "Sent Items" ]; then
+                    SEARCH_QUERY="to:${SENDER_FILTER} AND ${SEARCH_QUERY}"
+                else
+                    SEARCH_QUERY="from:${SENDER_FILTER} AND ${SEARCH_QUERY}"
+                fi
             fi
             
             SEARCH_ENCODED="${SEARCH_QUERY// /%20}"
@@ -216,7 +230,7 @@ test_request() {
             SEARCH_ENCODED="${SEARCH_ENCODED//=/%3D}"
             SEARCH_ENCODED="${SEARCH_ENCODED//</%3C}"
             
-            API_URL="https://graph.microsoft.com/v1.0/users/$USER_EMAIL/mailFolders/$API_FOLDER/messages?\$select=subject,from,toRecipients,receivedDateTime&\$top=$NUM_MESSAGES&\$search=\"${SEARCH_ENCODED}\""
+            API_URL="https://graph.microsoft.com/v1.0/users/$USER_EMAIL/mailFolders/$API_FOLDER/messages?\$select=subject,from,toRecipients,$DATE_FIELD&\$top=$NUM_MESSAGES&\$search=\"${SEARCH_ENCODED}\""
             
             # Debug: Check token
             if [ -z "$ACCESS_TOKEN" ]; then
@@ -293,6 +307,10 @@ try:
     messages = data.get('value', [])
     for msg in messages:
         msg['_folderName'] = '$FOLDER'
+        # Normalize date field for sorting
+        if '$FOLDER' == 'Sent Items':
+            if 'sentDateTime' in msg and 'receivedDateTime' not in msg:
+                msg['receivedDateTime'] = msg['sentDateTime']
     with open('/tmp/response_$RESPONSE_COUNT.json', 'w') as f:
         json.dump({'value': messages}, f)
 except json.JSONDecodeError as e:
@@ -350,16 +368,34 @@ try:
 
     sender_filter = '$SENDER_FILTER'.strip().lower()
     if sender_filter:
-        print(f'Filtering by sender: {sender_filter}')
+        print(f'Filtering by sender/recipient: {sender_filter}')
         filtered = []
         for msg in messages:
-            email_info = (msg.get('from') or {}).get('emailAddress') or {}
-            from_addr = (email_info.get('address') or '').lower()
-            from_name = (email_info.get('name') or '').lower()
-            if sender_filter in from_addr or sender_filter in from_name:
-                filtered.append(msg)
+            folder_name = msg.get('_folderName', '')
+            
+            # For Sent Items, check recipients; for others, check sender
+            if folder_name == 'Sent Items':
+                # Check toRecipients
+                to_recipients = msg.get('toRecipients', [])
+                match_found = False
+                for recipient in to_recipients:
+                    email_info = recipient.get('emailAddress') or {}
+                    to_addr = (email_info.get('address') or '').lower()
+                    to_name = (email_info.get('name') or '').lower()
+                    if sender_filter in to_addr or sender_filter in to_name:
+                        match_found = True
+                        break
+                if match_found:
+                    filtered.append(msg)
+            else:
+                # Check from field
+                email_info = (msg.get('from') or {}).get('emailAddress') or {}
+                from_addr = (email_info.get('address') or '').lower()
+                from_name = (email_info.get('name') or '').lower()
+                if sender_filter in from_addr or sender_filter in from_name:
+                    filtered.append(msg)
         messages = filtered
-        print(f'Found {len(messages)} messages from sender\n')
+        print(f'Found {len(messages)} messages matching filter\n')
 
     if not messages:
         print('No messages found.')
@@ -411,7 +447,8 @@ try:
         subject = msg.get('subject') or '(No Subject)'
         subject = subject[:37] + '...' if len(subject) > 40 else subject
 
-        received = msg.get('receivedDateTime') or ''
+        # Use sentDateTime for Sent Items, receivedDateTime for others
+        received = msg.get('receivedDateTime') or msg.get('sentDateTime') or ''
         try:
             dt = datetime.fromisoformat(received.replace('Z', '+00:00'))
             date_str = dt.strftime('%Y-%m-%d %H:%M:%S')
