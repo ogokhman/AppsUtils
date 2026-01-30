@@ -196,19 +196,27 @@ test_request() {
             # Get the actual API folder name from the mapping
             API_FOLDER="${FOLDER_MAP[$FOLDER]}"
             
-            # Build date filter and URL encode spaces
-            DATE_FILTER="receivedDateTime ge ${START_DATE}T00:00:00Z and receivedDateTime le ${END_DATE}T23:59:59Z"
-            DATE_FILTER_ENCODED="${DATE_FILTER// /%20}"
+            # Build URL using $search (supports more flexible queries, but no orderby)
+            # Build search query based on filters
+            SEARCH_QUERY=""
             
-            # Build URL - use $search for sender (cannot combine with $filter)
             if [ -n "$SENDER_FILTER" ]; then
-                # Use $search parameter for sender - $filter and $orderby not supported with $search
-                SEARCH_ENCODED="from:${SENDER_FILTER}"
-                SEARCH_ENCODED="${SEARCH_ENCODED// /%20}"
-                API_URL="https://graph.microsoft.com/v1.0/users/$USER_EMAIL/mailFolders/$API_FOLDER/messages?\$select=subject,from,toRecipients,receivedDateTime&\$top=$NUM_MESSAGES&\$search=\"${SEARCH_ENCODED}\""
-            else
-                API_URL="https://graph.microsoft.com/v1.0/users/$USER_EMAIL/mailFolders/$API_FOLDER/messages?\$select=subject,from,toRecipients,receivedDateTime&\$orderby=receivedDateTime%20desc&\$top=$NUM_MESSAGES&\$filter=${DATE_FILTER_ENCODED}"
+                SEARCH_QUERY="from:${SENDER_FILTER}"
             fi
+            
+            # Add date range to search query
+            SEARCH_QUERY="received>=${START_DATE} AND received<=${END_DATE}"
+            if [ -n "$SENDER_FILTER" ]; then
+                SEARCH_QUERY="from:${SENDER_FILTER} AND ${SEARCH_QUERY}"
+            fi
+            
+            SEARCH_ENCODED="${SEARCH_QUERY// /%20}"
+            SEARCH_ENCODED="${SEARCH_ENCODED//\"/%22}"
+            SEARCH_ENCODED="${SEARCH_ENCODED//>/%3E}"
+            SEARCH_ENCODED="${SEARCH_ENCODED//=/%3D}"
+            SEARCH_ENCODED="${SEARCH_ENCODED//</%3C}"
+            
+            API_URL="https://graph.microsoft.com/v1.0/users/$USER_EMAIL/mailFolders/$API_FOLDER/messages?\$select=subject,from,toRecipients,receivedDateTime&\$top=$NUM_MESSAGES&\$search=\"${SEARCH_ENCODED}\""
             
             # Debug: Check token
             if [ -z "$ACCESS_TOKEN" ]; then
@@ -216,8 +224,22 @@ test_request() {
                 continue
             fi
             
-            # Show URL for debugging
-            echo -e "${YELLOW}API URL: $API_URL${NC}"
+            # Save URL and token for debug_api.sh
+            echo "$API_URL" > /tmp/last_api_url.txt
+            echo "$ACCESS_TOKEN" > /tmp/last_access_token.txt
+            
+            # Show URL and full curl command for testing
+            echo -e "${BLUE}=== API URL ===${NC}"
+            echo "$API_URL"
+            echo ""
+            echo -e "${BLUE}=== Full curl command (copy & paste to test) ===${NC}"
+            echo "curl -X GET '$API_URL' \\"
+            echo "  -H 'Authorization: Bearer $ACCESS_TOKEN' \\"
+            echo "  -H 'Accept: application/json'"
+            echo ""
+            echo -e "${YELLOW}Note: The access token is included in the command above${NC}"
+            echo -e "${YELLOW}URL and token saved to /tmp for use with debug_api.sh${NC}"
+            echo ""
             
             # Use temp file to separate verbose output from response
             TEMP_RESPONSE="/tmp/curl_response_$$.txt"
