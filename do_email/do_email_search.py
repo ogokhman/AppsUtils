@@ -2,6 +2,7 @@ import requests
 import json
 import os
 import configparser
+import argparse
 from datetime import datetime, timedelta
 from dotenv import load_dotenv, set_key, find_dotenv
 
@@ -145,8 +146,8 @@ def get_access_token():
 # MICROSOFT GRAPH API FUNCTIONS
 # ============================================================================
 
-def get_all_messages(access_token, user_email, folder):
-    """Fetch all messages using pagination"""
+def get_all_messages_filter(access_token, user_email, folder):
+    """Fetch all messages using $filter API (supports date range)"""
 
     all_messages = []
 
@@ -156,7 +157,7 @@ def get_all_messages(access_token, user_email, folder):
     # Use $filter for date range (more reliable than $search)
     url = (
         f"{base_url}?"
-        f"$select=subject,from,toRecipients,sentDateTime,parentFolderId&"
+        f"$select=subject,from,toRecipients,ccRecipients,sentDateTime,parentFolderId&"
         f"$top={TOP}&"
         f"$filter=sentDateTime ge {START_DATE} and sentDateTime le {END_DATE}&"
         f"$orderby=sentDateTime asc"
@@ -217,17 +218,110 @@ def get_all_messages(access_token, user_email, folder):
     return all_messages
 
 
+def get_all_messages_search(access_token, user_email, folder, domains):
+    """Fetch all messages using $search API (domain filtering only, no date range support)"""
+
+    all_messages = []
+
+    # Build initial URL
+    base_url = f"https://graph.microsoft.com/v1.0/users/{user_email}/mailFolders/{folder}/messages"
+
+    # Build search query for domains
+    if domains:
+        # Use KQL syntax without extra quotes: to:domain.com
+        search_query = " OR ".join([f'to:{domain}' for domain in domains])
+        url = (
+            f"{base_url}?"
+            f"$select=subject,from,toRecipients,ccRecipients,sentDateTime,parentFolderId&"
+            f"$top={TOP}&"
+            f"$search=\"{search_query}\""
+        )
+    else:
+        # If no domains specified, just get all messages without date filter
+        url = (
+            f"{base_url}?"
+            f"$select=subject,from,toRecipients,ccRecipients,sentDateTime,parentFolderId&"
+            f"$top={TOP}"
+        )
+    
+    print(f"Search URL: {url}")
+    
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json"
+    }
+    
+    page_count = 0
+    
+    while url:
+        page_count += 1
+        print(f"Fetching page {page_count}...")
+        
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            
+            data = response.json()
+            messages = data.get("value", [])
+            
+            print(f"  Retrieved {len(messages)} messages")
+            
+            # Add messages to our collection
+            all_messages.extend(messages)
+            
+            # Check for next page
+            url = data.get("@odata.nextLink")
+            
+            if url:
+                print(f"  More results available, fetching next page...")
+            else:
+                print(f"  No more pages")
+                
+        except requests.exceptions.HTTPError as e:
+            print(f"HTTP Error: {e}")
+            print(f"Response: {response.text}")
+            
+            # If we get 401 Unauthorized, token might be invalid
+            if response.status_code == 401:
+                print("\n⚠ Token appears invalid. Generating new token...")
+                new_token = get_new_access_token()
+                headers["Authorization"] = f"Bearer {new_token}"
+                print("Retrying request with new token...")
+                continue
+            
+            break
+        except Exception as e:
+            print(f"Error: {e}")
+            break
+    
+    print(f"\n{'='*60}")
+    print(f"Total messages retrieved: {len(all_messages)}")
+    print(f"{'='*60}\n")
+    
+    return all_messages
+
+
+def get_all_messages(access_token, user_email, folder, api_method="filter", domains=None):
+    """Fetch all messages using specified API method"""
+    if api_method == "search":
+        return get_all_messages_search(access_token, user_email, folder, domains)
+    else:
+        return get_all_messages_filter(access_token, user_email, folder)
+
+
 def filter_by_domains(messages, domains):
-    """Filter messages by recipient domain(s)"""
+    """Filter messages by recipient domain(s) - includes both To and CC recipients"""
     if not domains:
         return messages
 
     filtered = []
 
     for msg in messages:
-        recipients = msg.get("toRecipients", [])
+        to_recipients = msg.get("toRecipients", [])
+        cc_recipients = msg.get("ccRecipients", [])
+        all_recipients = to_recipients + cc_recipients
 
-        for recipient in recipients:
+        for recipient in all_recipients:
             email = recipient.get("emailAddress", {}).get("address", "").lower()
             if any(domain in email for domain in domains):
                 filtered.append(msg)
@@ -237,13 +331,32 @@ def filter_by_domains(messages, domains):
 
 
 def get_contact(msg):
-    """Return recipient(s) for SentItems, sender for all other folders."""
+    """Return recipient(s) for SentItems, sender for all other folders.
+    Excludes @christoffersonrobb.com domain."""
     folder = msg.get("_folder", "")
     if folder == "SentItems":
-        recipients = msg.get("toRecipients", [])
-        return "; ".join(r.get("emailAddress", {}).get("address", "") for r in recipients)
+        to_recipients = msg.get("toRecipients", [])
+        # Filter out christoffersonrobb.com addresses
+        external_recipients = [
+            r.get("emailAddress", {}).get("address", "")
+            for r in to_recipients
+            if "christoffersonrobb.com" not in r.get("emailAddress", {}).get("address", "").lower()
+        ]
+        return "; ".join(external_recipients)
     else:
         return msg.get("from", {}).get("emailAddress", {}).get("address", "")
+
+
+def get_cc(msg):
+    """Return CC recipients, excluding @christoffersonrobb.com domain."""
+    cc_recipients = msg.get("ccRecipients", [])
+    # Filter out christoffersonrobb.com addresses
+    external_cc = [
+        r.get("emailAddress", {}).get("address", "")
+        for r in cc_recipients
+        if "christoffersonrobb.com" not in r.get("emailAddress", {}).get("address", "").lower()
+    ]
+    return "; ".join(external_cc)
 
 
 def print_message_table(messages):
@@ -260,18 +373,20 @@ def print_message_table(messages):
         subject = msg.get("subject", "(No subject)")
         sent_time = msg.get("sentDateTime", "")[:16].replace("T", " ")
         contact = get_contact(msg)
-        rows.append((num, user, folder, subject, sent_time, contact))
+        cc = get_cc(msg)
+        rows.append((num, user, folder, subject, sent_time, contact, cc))
 
     # Calculate column widths
-    headers = ("#", "User", "Folder", "Subject", "Sent DateTime", "Recipient/Sender")
+    headers = ("#", "User", "Folder", "Subject", "Sent DateTime", "Recipient/Sender", "CC")
     widths = [len(h) for h in headers]
     for row in rows:
         for i, val in enumerate(row):
             widths[i] = max(widths[i], len(val))
 
-    # Cap subject and recipient widths for readability
+    # Cap subject, recipient, and CC widths for readability
     widths[3] = min(widths[3], 50)
-    widths[5] = min(widths[5], 50)
+    widths[5] = min(widths[5], 40)
+    widths[6] = min(widths[6], 40)
 
     def truncate(s, w):
         return s if len(s) <= w else s[:w - 3] + "..."
@@ -304,7 +419,7 @@ def save_to_csv(messages, filename="messages.csv"):
         writer = csv.writer(f)
 
         # Write header
-        writer.writerow(['#', 'User', 'Folder', 'Subject', 'Sent DateTime', 'Recipient/Sender'])
+        writer.writerow(['#', 'User', 'Folder', 'Subject', 'Sent DateTime', 'Recipient/Sender', 'CC'])
 
         # Write data
         for i, msg in enumerate(messages, 1):
@@ -313,8 +428,9 @@ def save_to_csv(messages, filename="messages.csv"):
             subject = msg.get("subject", "(No subject)")
             sent_time = msg.get("sentDateTime", "")
             contact = get_contact(msg)
+            cc = get_cc(msg)
 
-            writer.writerow([i, user, folder, subject, sent_time, contact])
+            writer.writerow([i, user, folder, subject, sent_time, contact, cc])
 
     print(f"Messages saved to {filename}")
 
@@ -324,8 +440,21 @@ def save_to_csv(messages, filename="messages.csv"):
 # ============================================================================
 
 if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Microsoft Graph API - Email Retrieval')
+    parser.add_argument(
+        '--api',
+        choices=['filter', 'search'],
+        default='filter',
+        help='API method to use: "filter" (default) uses $filter with date range support, "search" uses $search with domain filtering only'
+    )
+    args = parser.parse_args()
+    
+    api_method = args.api
+    
     print("="*60)
     print("Microsoft Graph API - Email Retrieval with Token Caching")
+    print(f"Using API method: {api_method.upper()}")
     print("="*60)
     print()
 
@@ -344,7 +473,10 @@ if __name__ == "__main__":
 
     print(f"Users: {', '.join(USERS)}")
     print(f"Folders: {', '.join(FOLDERS)}")
-    print(f"Date range: {START_DATE} to {END_DATE}")
+    if api_method == "filter":
+        print(f"Date range: {START_DATE} to {END_DATE}")
+    else:
+        print(f"Note: $search API does not support date range filtering")
     print(f"Results per page: {TOP}")
     if FILTER_DOMAINS:
         print(f"Filtering by domains: {', '.join(FILTER_DOMAINS)}")
@@ -362,10 +494,11 @@ if __name__ == "__main__":
                 print(f"Searching: {user_email} / {folder}")
                 print(f"{'─'*60}")
 
-                messages = get_all_messages(access_token, user_email, folder)
+                messages = get_all_messages(access_token, user_email, folder, api_method=api_method, domains=FILTER_DOMAINS)
 
-                # Filter by domains if specified
-                if FILTER_DOMAINS:
+                # For filter method, apply domain filtering if specified
+                # For search method, domains are already applied in the query
+                if api_method == "filter" and FILTER_DOMAINS:
                     print(f"Filtering for domains: {', '.join(FILTER_DOMAINS)}")
                     messages = filter_by_domains(messages, FILTER_DOMAINS)
                     print(f"Messages matching domains: {len(messages)}")
