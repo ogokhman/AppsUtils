@@ -4,6 +4,7 @@ import os
 import configparser
 import argparse
 from datetime import datetime, timedelta
+from urllib.parse import quote
 from dotenv import load_dotenv, set_key, find_dotenv
 
 # ============================================================================
@@ -34,9 +35,12 @@ END_DATE = config.get("dates", "end_date", fallback="2026-01-30") + "T23:59:59Z"
 TOP = config.getint("messages", "top", fallback=500)
 FOLDERS = [f.strip() for f in config.get("folders", "folders", fallback="SentItems").split(",") if f.strip()]
 
-# Load filter domains from do_domains.txt file instead of config
+# Will be populated if --input file is used
+INPUT_USERS_DATA = {}
+
+# Legacy domain loading - only used when not using --input file
 def load_filter_domains():
-    """Load domains from do_domains.txt file"""
+    """Load domains from do_domains.txt file (deprecated - use --input file instead)"""
     domains_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "do_domains.txt")
     domains = []
     
@@ -52,7 +56,60 @@ def load_filter_domains():
 FILTER_DOMAINS = load_filter_domains()
 
 # ============================================================================
-# ACCESS TOKEN GENERATION
+# USER LOADING FUNCTIONS
+# ============================================================================
+
+def get_mailbox_users():
+    """Get users from [mailbox] section in do.config"""
+    users = [u.strip() for u in config.get("mailbox", "users", fallback="").split(",") if u.strip()]
+    # Append domain if not already included
+    return [u if "@" in u else f"{u}@christoffersonrobb.com" for u in users]
+
+def get_team_members():
+    """Get all members from [marketer_team] section in do.config"""
+    members = [m.strip() for m in config.get("marketer_team", "members", fallback="").split(",") if m.strip()]
+    # Append domain to each member
+    return [f"{m}@christoffersonrobb.com" for m in members]
+
+def get_users_from_input_file(input_file):
+    """Load users and their folders from input config file"""
+    input_config = configparser.ConfigParser()
+    input_config.read(input_file)
+    
+    users_data = {}
+    for section in input_config.sections():
+        if "user" in input_config[section]:
+            user_email = input_config[section]["user"]
+            folders = []
+            if "folders" in input_config[section]:
+                folders_str = input_config[section]["folders"]
+                folders = [f.strip() for f in folders_str.split(",") if f.strip()]
+            
+            users_data[user_email] = {
+                "folders": folders,
+                "search_query": input_config[section].get("search_query", ""),
+                "domains": input_config[section].get("domains", ""),
+            }
+    
+    return users_data
+
+def load_all_parameters_from_input(input_file):
+    """Load ALL parameters (dates, messages, folders, domains, api, users) from input file"""
+    input_config = configparser.ConfigParser()
+    input_config.read(input_file)
+    
+    params = {
+        "start_date": input_config.get("dates", "start_date", fallback="2025-12-01") + "T00:00:00Z",
+        "end_date": input_config.get("dates", "end_date", fallback="2026-01-30") + "T23:59:59Z",
+        "top": input_config.getint("messages", "top", fallback=500),
+        "folders": [f.strip() for f in input_config.get("folders", "folders", fallback="SentItems").split(",") if f.strip()],
+        "api": input_config.get("api", "method", fallback="filter"),
+        "users_data": get_users_from_input_file(input_file),
+        "filter_domains": [],  # Domains come from per-user sections in input file
+    }
+    
+    return params
+
 # ============================================================================
 
 def is_token_expired():
@@ -201,13 +258,28 @@ def get_user_folders(access_token, user_email):
 # MICROSOFT GRAPH API FUNCTIONS
 # ============================================================================
 
+def normalize_folder_name(folder):
+    """Normalize folder name for Microsoft Graph API (e.g., 'Sent Items' -> 'SentItems')"""
+    # Map common folder names with spaces to their Graph API equivalents
+    folder_mapping = {
+        "sent items": "SentItems",
+        "deleted items": "DeletedItems",
+        "junk email": "JunkEmail",
+        "conversation history": "ConversationHistory",
+    }
+    return folder_mapping.get(folder.lower(), folder)
+
+
 def get_all_messages_filter(access_token, user_email, folder):
     """Fetch all messages using $filter API (supports date range)"""
 
     all_messages = []
 
-    # Build initial URL
-    base_url = f"https://graph.microsoft.com/v1.0/users/{user_email}/mailFolders/{folder}/messages"
+    # Normalize folder name for Graph API
+    folder = normalize_folder_name(folder)
+    
+    # Build initial URL with URL-encoded folder name
+    base_url = f"https://graph.microsoft.com/v1.0/users/{user_email}/mailFolders/{quote(folder)}/messages"
 
     # Use $filter for date range (more reliable than $search)
     url = (
@@ -278,13 +350,20 @@ def get_all_messages_search(access_token, user_email, folder, domains):
 
     all_messages = []
 
-    # Build initial URL
-    base_url = f"https://graph.microsoft.com/v1.0/users/{user_email}/mailFolders/{folder}/messages"
+    # Normalize folder name for Graph API
+    folder = normalize_folder_name(folder)
+    
+    # Build initial URL with URL-encoded folder name
+    base_url = f"https://graph.microsoft.com/v1.0/users/{user_email}/mailFolders/{quote(folder)}/messages"
 
     # Build search query for domains
     if domains:
-        # Use KQL syntax without extra quotes: to:domain.com
-        search_query = " OR ".join([f'to:{domain}' for domain in domains])
+        # Use simplified KQL syntax: combine all to/from without nested parentheses
+        search_parts = []
+        for domain in domains:
+            search_parts.append(f'to:{domain}')
+            search_parts.append(f'from:{domain}')
+        search_query = " OR ".join(search_parts)
         url = (
             f"{base_url}?"
             f"$select=subject,from,toRecipients,ccRecipients,sentDateTime,parentFolderId&"
@@ -516,8 +595,8 @@ if __name__ == "__main__":
     parser.add_argument(
         '--api',
         choices=['filter', 'search'],
-        default='filter',
-        help='API method to use: "filter" (default) uses $filter with date range support, "search" uses $search with domain filtering only'
+        default='search',
+        help='API method to use: "search" (default) uses $search with domain filtering, "filter" uses $filter with date range support'
     )
     parser.add_argument(
         '--folders',
@@ -527,16 +606,57 @@ if __name__ == "__main__":
     parser.add_argument(
         '--user',
         type=str,
-        help='Override user email from config (comma-separated for multiple users)'
+        help='Override user email from config (comma-separated for multiple users) - can be used to specify users not in [mailbox]'
+    )
+    parser.add_argument(
+        '--team',
+        action='store_true',
+        help='Use all members from [marketer_team] section instead of [mailbox] (default uses [mailbox])'
+    )
+    parser.add_argument(
+        '--input',
+        type=str,
+        help='Load users and folders from input config file (e.g., do_final_run.config)'
     )
     args = parser.parse_args()
     
-    api_method = args.api
     show_folders_only = args.folders
     
-    # Override USERS if --user parameter is provided
-    if args.user:
+    # Determine which users to use and load all parameters
+    if args.input:
+        # Load ALL parameters from input file
+        input_file_path = os.path.abspath(args.input)
+        if not os.path.exists(input_file_path):
+            print(f"ERROR: Input file not found: {input_file_path}")
+            exit(1)
+        
+        input_params = load_all_parameters_from_input(input_file_path)
+        START_DATE = input_params["start_date"]
+        END_DATE = input_params["end_date"]
+        TOP = input_params["top"]
+        FOLDERS = input_params["folders"]
+        # Command line --api argument takes precedence over input file
+        api_method = args.api
+        FILTER_DOMAINS = input_params["filter_domains"]
+        INPUT_USERS_DATA = input_params["users_data"]
+        USERS = list(INPUT_USERS_DATA.keys())
+    elif args.user:
+        # If --user is explicitly provided, use those (override everything)
+        api_method = args.api
         USERS = [u.strip() for u in args.user.split(",") if u.strip()]
+        # Append domain if not already included
+        USERS = [u if "@" in u else f"{u}@christoffersonrobb.com" for u in USERS]
+        INPUT_USERS_DATA = {}
+    elif args.team:
+        # Use team members from [marketer_team]
+        api_method = args.api
+        USERS = get_team_members()
+        INPUT_USERS_DATA = {}
+    else:
+        # Default: use [mailbox] users
+        api_method = args.api
+        USERS = get_mailbox_users()
+        INPUT_USERS_DATA = {}
     
     print("="*60)
     print("Microsoft Graph API - Email Retrieval with Token Caching")
@@ -596,18 +716,33 @@ if __name__ == "__main__":
         all_final_messages = []
 
         for user_email in USERS:
-            for folder in FOLDERS:
+            # Determine folders and domains to use for this user
+            if INPUT_USERS_DATA and user_email in INPUT_USERS_DATA:
+                user_folders = INPUT_USERS_DATA[user_email].get("folders", FOLDERS)
+                if not user_folders:
+                    user_folders = FOLDERS
+                # Get per-user domains from input file
+                user_domains_str = INPUT_USERS_DATA[user_email].get("domains", "")
+                if user_domains_str:
+                    user_domains = [d.strip() for d in user_domains_str.split("OR") if d.strip()]
+                else:
+                    user_domains = FILTER_DOMAINS
+            else:
+                user_folders = FOLDERS
+                user_domains = FILTER_DOMAINS
+            
+            for folder in user_folders:
                 print(f"\n{'─'*60}")
                 print(f"Searching: {user_email} / {folder}")
                 print(f"{'─'*60}")
 
-                messages = get_all_messages(access_token, user_email, folder, api_method=api_method, domains=FILTER_DOMAINS)
+                messages = get_all_messages(access_token, user_email, folder, api_method=api_method, domains=user_domains)
 
                 # For filter method, apply domain filtering if specified
                 # For search method, domains are already applied in the query
-                if api_method == "filter" and FILTER_DOMAINS:
-                    print(f"Filtering for domains: {', '.join(FILTER_DOMAINS)}")
-                    messages = filter_by_domains(messages, FILTER_DOMAINS)
+                if api_method == "filter" and user_domains:
+                    print(f"Filtering for domains: {', '.join(user_domains)}")
+                    messages = filter_by_domains(messages, user_domains)
                     print(f"Messages matching domains: {len(messages)}")
 
                 # Tag each message with the user mailbox and folder
