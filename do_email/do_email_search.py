@@ -33,7 +33,23 @@ START_DATE = config.get("dates", "start_date", fallback="2025-12-01") + "T00:00:
 END_DATE = config.get("dates", "end_date", fallback="2026-01-30") + "T23:59:59Z"
 TOP = config.getint("messages", "top", fallback=500)
 FOLDERS = [f.strip() for f in config.get("folders", "folders", fallback="SentItems").split(",") if f.strip()]
-FILTER_DOMAINS = [d.strip().lower() for d in config.get("domains", "filter_domains", fallback="").split(",") if d.strip()]
+
+# Load filter domains from do_domains.txt file instead of config
+def load_filter_domains():
+    """Load domains from do_domains.txt file"""
+    domains_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "do_domains.txt")
+    domains = []
+    
+    if os.path.exists(domains_file):
+        with open(domains_file, 'r') as f:
+            for line in f:
+                domain = line.strip().lower()
+                if domain:  # Skip empty lines
+                    domains.append(domain)
+    
+    return domains
+
+FILTER_DOMAINS = load_filter_domains()
 
 # ============================================================================
 # ACCESS TOKEN GENERATION
@@ -140,6 +156,45 @@ def get_access_token():
         return get_new_access_token()
     else:
         return ACCESS_TOKEN
+
+
+def get_user_folders(access_token, user_email):
+    """Fetch all folders for a user from Microsoft Graph API"""
+    
+    base_url = f"https://graph.microsoft.com/v1.0/users/{user_email}/mailFolders"
+    
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json"
+    }
+    
+    folders = []
+    url = f"{base_url}?$select=id,displayName"
+    
+    try:
+        while url:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            
+            data = response.json()
+            items = data.get("value", [])
+            
+            for item in items:
+                folder_name = item.get("displayName", "")
+                folder_id = item.get("id", "")
+                if folder_name and folder_id:
+                    folders.append({"name": folder_name, "id": folder_id})
+            
+            # Check for next page
+            url = data.get("@odata.nextLink")
+            
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP Error retrieving folders: {e}")
+        print(f"Response: {response.text}")
+    except Exception as e:
+        print(f"Error retrieving folders: {e}")
+    
+    return folders
 
 
 # ============================================================================
@@ -309,6 +364,20 @@ def get_all_messages(access_token, user_email, folder, api_method="filter", doma
         return get_all_messages_filter(access_token, user_email, folder)
 
 
+def has_external_recipients(msg):
+    """Check if message has any recipients outside of @christoffersonrobb.com domain"""
+    to_recipients = msg.get("toRecipients", [])
+    cc_recipients = msg.get("ccRecipients", [])
+    all_recipients = to_recipients + cc_recipients
+    
+    for recipient in all_recipients:
+        email = recipient.get("emailAddress", {}).get("address", "").lower()
+        if email and "christoffersonrobb.com" not in email:
+            return True
+    
+    return False
+
+
 def filter_by_domains(messages, domains):
     """Filter messages by recipient domain(s) - includes both To and CC recipients"""
     if not domains:
@@ -324,7 +393,9 @@ def filter_by_domains(messages, domains):
         for recipient in all_recipients:
             email = recipient.get("emailAddress", {}).get("address", "").lower()
             if any(domain in email for domain in domains):
-                filtered.append(msg)
+                # Check if message has any external recipients (non-christoffersonrobb.com)
+                if has_external_recipients(msg):
+                    filtered.append(msg)
                 break  # Found a match, move to next message
 
     return filtered
@@ -386,7 +457,7 @@ def print_message_table(messages):
     # Cap subject, recipient, and CC widths for readability
     widths[3] = min(widths[3], 50)
     widths[5] = min(widths[5], 40)
-    widths[6] = min(widths[6], 40)
+    # Don't cap CC column - show complete list
 
     def truncate(s, w):
         return s if len(s) <= w else s[:w - 3] + "..."
@@ -448,13 +519,31 @@ if __name__ == "__main__":
         default='filter',
         help='API method to use: "filter" (default) uses $filter with date range support, "search" uses $search with domain filtering only'
     )
+    parser.add_argument(
+        '--folders',
+        action='store_true',
+        help='Show user folders and exit (do not run search)'
+    )
+    parser.add_argument(
+        '--user',
+        type=str,
+        help='Override user email from config (comma-separated for multiple users)'
+    )
     args = parser.parse_args()
     
     api_method = args.api
+    show_folders_only = args.folders
+    
+    # Override USERS if --user parameter is provided
+    if args.user:
+        USERS = [u.strip() for u in args.user.split(",") if u.strip()]
     
     print("="*60)
     print("Microsoft Graph API - Email Retrieval with Token Caching")
-    print(f"Using API method: {api_method.upper()}")
+    if show_folders_only:
+        print("Mode: Show User Folders")
+    else:
+        print(f"Using API method: {api_method.upper()}")
     print("="*60)
     print()
 
@@ -486,6 +575,24 @@ if __name__ == "__main__":
         # Get access token (will reuse if still valid)
         access_token = get_access_token()
 
+        # If --folders flag is set, show folders and exit
+        if show_folders_only:
+            for user_email in USERS:
+                print(f"\n{'─'*60}")
+                print(f"Folders for: {user_email}")
+                print(f"{'─'*60}")
+                
+                folders = get_user_folders(access_token, user_email)
+                
+                if folders:
+                    for i, folder in enumerate(folders, 1):
+                        print(f"{i}. {folder['name']} (ID: {folder['id']})")
+                else:
+                    print("No folders found")
+            
+            print("\n✓ Folders displayed successfully!")
+            exit(0)
+
         all_final_messages = []
 
         for user_email in USERS:
@@ -516,9 +623,15 @@ if __name__ == "__main__":
 
         if all_final_messages:
             print()
-            print_message_table(all_final_messages)
-            save_to_json(all_final_messages)
-            save_to_csv(all_final_messages)
+            # Filter out messages with no external recipients
+            all_final_messages = [msg for msg in all_final_messages if has_external_recipients(msg)]
+            
+            if all_final_messages:
+                print_message_table(all_final_messages)
+                # save_to_json(all_final_messages)  # Disabled JSON output
+                save_to_csv(all_final_messages)
+            else:
+                print("No messages found with external recipients")
         else:
             print("No messages found matching criteria")
 
